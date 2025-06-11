@@ -1,0 +1,1254 @@
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+
+// For this self-contained immersive, we'll assume Tailwind classes are available.
+
+const App = () => {
+  // State for image handling
+  const [originalImage, setOriginalImage] = useState(null); // Data URL of original uploaded image
+  const [processedImage, setProcessedImage] = useState(null); // Data URL of background-removed image
+  // superResolvedImage and its related states/logic are removed
+  const [isLoading, setIsLoading] = useState(false); // Loading state for general operations (download, etc.)
+
+  // State for background removal options
+  const [backgroundType, setBackgroundType] = useState('transparent'); // 'transparent', 'color', 'image'
+  const [backgroundColor, setBackgroundColor] = useState('#ffffff'); // Default white
+  const [customBackgroundFile, setCustomBackgroundFile] = useState(null); // File object for custom background
+  const [customBackgroundDataUrl, setCustomBackgroundDataUrl] = useState(null); // Data URL for custom background
+
+  // State for cropping and canvas manipulation
+  const canvasRef = useRef(null);
+  const imageRef = useRef(new Image()); // Hidden image element for original/processed image
+  const [zoomLevel, setZoomLevel] = useState(1); // Zoom for the canvas preview
+  const [pan, setPan] = useState({ x: 0, y: 0 }); // Pan for the canvas preview
+  const [isPanning, setIsPanning] = useState(false);
+  const [startPan, setStartPan] = useState({ x: 0, y: 0 });
+  const [cropShape, setCropShape] = useState('custom'); // Always 'custom' now, or 'circle' if selected
+  const [customCropWidth, setCustomCropWidth] = useState(800); // Default custom width (e.g., for 4:3)
+  const [customCropHeight, setCustomCropHeight] = useState(600); // Default custom height (e.g., for 4:3)
+
+  // State for resolution & export controls
+  const [pixelDensity, setPixelDensity] = useState('4k'); // Changed default to '4k' for highest quality
+  const [customDPI, setCustomDPI] = useState(300); // Default DPI
+  const [outputPreset, setOutputPreset] = useState('none'); // 'none', '300x400', '600x800', 'passport'
+  const [customOutputWidth, setCustomOutputWidth] = useState('');
+  const [customOutputHeight, setCustomOutputHeight] = useState('');
+
+  // UI States
+  const [darkMode, setDarkMode] = useState(false);
+  const [toast, setToast] = useState(null); // { message: string, type: 'success' | 'error' | 'info' }
+
+  // LLM States
+  const [generatedDescription, setGeneratedDescription] = useState('');
+  const [showDescriptionModal, setShowDescriptionModal] = useState(false);
+  const [isGeneratingDescription, setIsGeneratingDescription] = useState(false);
+  // isEnhancingImage state removed
+
+  // API Key for remove.bg
+  const REMOVEBG_API_KEY = "bNDVjQhJJA1R2zi22A5fhzN2";
+
+  // DeepAI related constants removed
+
+  // --- Utility Functions ---
+
+  const showToast = useCallback((message, type = 'info') => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast(null);
+    }, 3000);
+  }, []);
+
+  const clearApp = () => {
+    setOriginalImage(null);
+    setProcessedImage(null);
+    // superResolvedImage cleared
+    setZoomLevel(1);
+    setPan({ x: 0, y: 0 });
+    setBackgroundType('transparent');
+    setBackgroundColor('#ffffff');
+    setCustomBackgroundFile(null);
+    setCustomBackgroundDataUrl(null);
+    setCropShape('custom'); // Ensure it stays custom
+    setCustomCropWidth(800); // Reset to default custom values
+    setCustomCropHeight(600);
+    setPixelDensity('4k'); // Reset pixel density to 4k
+    setOutputPreset('none'); // Reset output preset
+    setCustomOutputWidth('');
+    setCustomOutputHeight('');
+    setGeneratedDescription('');
+    setShowDescriptionModal(false);
+    showToast('App cleared!', 'info');
+  };
+
+  // --- Image Upload & Processing ---
+
+  const handleImageUpload = useCallback((event) => {
+    const file = event.target.files[0];
+    if (file) {
+      // Check file size (50MB limit)
+      if (file.size > 50 * 1024 * 1024) {
+        showToast('File size exceeds 50MB limit. Please upload a smaller image.', 'error');
+        return;
+      }
+
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+        showToast('Invalid file type. Please upload JPG, PNG, or WEBP.', 'error');
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setOriginalImage(reader.result);
+        imageRef.current.onload = () => {
+          // Reset canvas state on new image upload
+          setZoomLevel(1);
+          setPan({ x: 0, y: 0 });
+          // superResolvedImage cleared
+          // Automatically remove background upon upload
+          removeBackground(reader.result);
+        };
+        imageRef.current.src = reader.result; // This triggers imageRef.current.onload
+      };
+      reader.readAsDataURL(file);
+    }
+  }, [showToast]);
+
+  const handleDrop = useCallback((event) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files[0];
+    if (file) {
+      handleImageUpload({ target: { files: [file] } });
+    }
+  }, [handleImageUpload]);
+
+  const removeBackground = useCallback(async (imageDataUrl) => {
+    setIsLoading(true);
+    showToast('Removing background...', 'info');
+
+    try {
+      if (REMOVEBG_API_KEY === "YOUR_REMOVEBG_API_KEY") {
+        showToast('Please set your remove.bg API key in the code!', 'error');
+        setProcessedImage(imageDataUrl); // Show original if API key is missing
+        return;
+      }
+
+      // Convert Data URL to Blob for FormData
+      const response = await fetch(imageDataUrl);
+      const blob = await response.blob();
+
+      const formData = new FormData();
+      formData.append('image_file', blob, 'image.png');
+      formData.append('size', 'auto'); // 'auto' uses their default, which might be limited. For higher quality, 'full' would require a paid plan.
+      formData.append('format', 'png'); // Ensure transparent output
+
+      const apiResponse = await fetch('https://api.remove.bg/v1.0/removebg', {
+        method: 'POST',
+        headers: {
+          'X-Api-Key': REMOVEBG_API_KEY
+        },
+        body: formData
+      });
+
+      if (!apiResponse.ok) {
+        const errorText = await apiResponse.text();
+        throw new Error(`remove.bg API Error: ${apiResponse.status} - ${errorText}. Please check your API key and account limits.`);
+      }
+
+      const resultBlob = await apiResponse.blob();
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setProcessedImage(reader.result);
+        showToast('Background removed successfully!', 'success');
+      };
+      reader.readAsDataURL(resultBlob);
+
+    } catch (error) {
+      console.error('Background removal failed:', error);
+      showToast(`Background removal failed: ${error.message}`, 'error');
+      setProcessedImage(originalImage); // Fallback to original if removal fails
+    } finally {
+      setIsLoading(false);
+    }
+  }, [originalImage, showToast, REMOVEBG_API_KEY]);
+
+  const handleCustomBackgroundUpload = useCallback((event) => {
+    const file = event.target.files[0];
+    if (file) {
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+        showToast('Invalid file type for background. Please upload JPG, PNG, or WEBP.', 'error');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setCustomBackgroundDataUrl(reader.result);
+        setBackgroundType('image');
+        showToast('Custom background uploaded!', 'info');
+      };
+      reader.readAsDataURL(file);
+      setCustomBackgroundFile(file); // Store file object for potential later use
+    }
+  }, [showToast]);
+
+  // --- Canvas Drawing Logic ---
+
+  const drawCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !imageRef.current.src) return;
+
+    const ctx = canvas.getContext('2d');
+    const image = imageRef.current; // This image will be the processed one
+
+    const imageWidth = image.naturalWidth;
+    const imageHeight = image.naturalHeight;
+
+    // Calculate canvas size to fit container, maintaining aspect ratio for preview
+    const containerWidth = canvas.parentNode.clientWidth;
+    const containerHeight = canvas.parentNode.clientHeight;
+    const canvasRatio = containerWidth / containerHeight;
+    const imageRatio = imageWidth / imageHeight;
+
+    let displayWidth, displayHeight;
+    if (imageRatio > canvasRatio) {
+      displayWidth = containerWidth;
+      displayHeight = containerWidth / imageRatio;
+    } else {
+      displayHeight = containerHeight;
+      displayWidth = containerHeight * imageRatio;
+    }
+
+    // Set canvas dimensions (actual pixels, not CSS pixels)
+    canvas.width = displayWidth;
+    canvas.height = displayHeight;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Apply background first
+    if (backgroundType === 'color') {
+      ctx.fillStyle = backgroundColor;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    } else if (backgroundType === 'image' && customBackgroundDataUrl) {
+      const bgImage = new Image();
+      bgImage.src = customBackgroundDataUrl;
+      bgImage.onload = () => {
+        // Draw background image scaled to fill canvas
+        const bgRatio = bgImage.naturalWidth / bgImage.naturalHeight;
+        let sx = 0, sy = 0, sWidth = bgImage.naturalWidth, sHeight = bgImage.naturalHeight;
+        let dx = 0, dy = 0, dWidth = canvas.width, dHeight = canvas.height;
+
+        if (bgRatio > canvas.width / canvas.height) { // bg image is wider than canvas
+          dHeight = canvas.height;
+          dWidth = dHeight * bgRatio;
+          dx = (canvas.width - dWidth) / 2;
+        } else { // bg image is taller than canvas
+          dWidth = canvas.width;
+          dHeight = dWidth / bgRatio;
+          dy = (canvas.height - dHeight) / 2;
+        }
+        ctx.drawImage(bgImage, dx, dy, dWidth, dHeight);
+        // Redraw main image after background image is loaded
+        drawForegroundImage();
+      };
+      if (!bgImage.complete) return; // If image is not loaded, return and let onload handle redraw
+    } else { // Transparent checkerboard
+      const patternSize = 20;
+      for (let x = 0; x < canvas.width; x += patternSize) {
+        for (let y = 0; y < canvas.height; y += patternSize) {
+          ctx.fillStyle = (Math.floor(x / patternSize) + Math.floor(y / patternSize)) % 2 === 0 ? '#f0f0f0' : '#e0e0e0';
+          ctx.fillRect(x, y, patternSize, patternSize);
+        }
+      }
+    }
+
+    const drawForegroundImage = () => {
+      // Calculate image dimensions relative to zoom and pan
+      const scaledWidth = imageWidth * zoomLevel;
+      const scaledHeight = imageHeight * zoomLevel;
+
+      // Centering offset for the image within the canvas, then applying pan
+      const offsetX = (canvas.width - scaledWidth) / 2 + pan.x;
+      const offsetY = (canvas.height - scaledHeight) / 2 + pan.y;
+
+      ctx.save(); // Save context state before clipping
+
+      // Always apply clipping based on custom crop dimensions (or circle if selected)
+      if (cropShape === 'circle') {
+        const radius = Math.min(scaledWidth, scaledHeight) / 2;
+        const centerX = offsetX + scaledWidth / 2;
+        const centerY = offsetY + scaledHeight / 2;
+        
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, radius, 0, Math.PI * 2, true);
+        ctx.closePath();
+        ctx.clip();
+      } else { // 'custom' crop shape
+        const effectiveCropWidth = parseFloat(customCropWidth);
+        const effectiveCropHeight = parseFloat(customCropHeight);
+        
+        if (effectiveCropWidth && effectiveCropHeight) {
+          const cropRatio = effectiveCropWidth / effectiveCropHeight;
+          
+          const currentCanvasDisplayRatio = canvas.width / canvas.height;
+          let cropRectWidth, cropRectHeight;
+          if (cropRatio > currentCanvasDisplayRatio) { // Desired crop is wider than canvas display
+            cropRectWidth = canvas.width;
+            cropRectHeight = canvas.width / cropRatio;
+          } else { // Desired crop is taller than canvas display
+            cropRectHeight = canvas.height;
+            cropRectWidth = canvas.height * cropRatio;
+          }
+          
+          // Center the crop rectangle within the preview canvas
+          const cropRectX = (canvas.width - cropRectWidth) / 2;
+          const cropRectY = (canvas.height - cropRectHeight) / 2;
+
+          ctx.beginPath();
+          ctx.rect(cropRectX, cropRectY, cropRectWidth, cropRectHeight);
+          ctx.clip();
+        }
+      }
+
+      ctx.drawImage(image, offsetX, offsetY, scaledWidth, scaledHeight);
+      ctx.restore(); // Restore context to remove clipping path for subsequent drawings
+
+      // DRAW VISUAL CROPPING INDICATOR (Yellow Dashed Rectangle/Circle)
+      if (customCropWidth && customCropHeight) { // Only draw if custom dimensions are set
+        const cropRatio = parseFloat(customCropWidth) / parseFloat(customCropHeight);
+        let indicatorWidth, indicatorHeight;
+
+        // Calculate indicator dimensions to fit the chosen aspect ratio within the canvas
+        const currentCanvasDisplayRatio = canvas.width / canvas.height;
+        if (cropRatio > currentCanvasDisplayRatio) {
+          indicatorWidth = canvas.width * 0.9; // Use 90% of canvas width to leave some margin
+          indicatorHeight = indicatorWidth / cropRatio;
+        } else {
+          indicatorHeight = canvas.height * 0.9; // Use 90% of canvas height
+          indicatorWidth = indicatorHeight * cropRatio;
+        }
+
+        const indicatorX = (canvas.width - indicatorWidth) / 2;
+        const indicatorY = (canvas.height - indicatorHeight) / 2;
+
+        ctx.strokeStyle = 'rgba(255, 255, 0, 0.8)'; // Yellow
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 8]); // Dashed line for clarity
+        
+        if (cropShape === 'circle') {
+            const radius = Math.min(indicatorWidth, indicatorHeight) / 2;
+            ctx.beginPath();
+            ctx.arc(canvas.width / 2, canvas.height / 2, radius, 0, Math.PI * 2, true);
+            ctx.stroke();
+        } else { // custom crop
+            ctx.strokeRect(indicatorX, indicatorY, indicatorWidth, indicatorHeight);
+        }
+        
+        ctx.setLineDash([]); // Reset line dash
+      }
+    };
+
+    drawForegroundImage(); // Initial draw or if background is transparent/solid
+  }, [processedImage, originalImage, zoomLevel, pan, backgroundType, backgroundColor, customBackgroundDataUrl, cropShape, customCropWidth, customCropHeight]);
+
+
+  // --- Canvas Interaction Handlers (Pan & Zoom) ---
+
+  const handleMouseDown = useCallback((e) => {
+    setIsPanning(true);
+    setStartPan({ x: e.clientX, y: e.clientY });
+    canvasRef.current.style.cursor = 'grabbing';
+  }, []);
+
+  const handleMouseMove = useCallback((e) => {
+    if (!isPanning) return;
+    const dx = e.clientX - startPan.x;
+    const dy = e.clientY - startPan.y;
+    setPan(prevPan => ({ x: prevPan.x + dx, y: prevPan.y + dy }));
+    setStartPan({ x: e.clientX, y: e.clientY });
+  }, [isPanning, startPan]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsPanning(false);
+    canvasRef.current.style.cursor = 'grab';
+  }, []);
+
+  const handleMouseLeave = useCallback(() => {
+    setIsPanning(false);
+    canvasRef.current.style.cursor = 'grab';
+  }, []);
+
+  const handleWheel = useCallback((e) => {
+    e.preventDefault(); // Prevent page scrolling
+    const scaleFactor = 1.1; // How much to zoom in/out
+    const newZoom = e.deltaY < 0 ? zoomLevel * scaleFactor : zoomLevel / scaleFactor;
+    setZoomLevel(Math.max(0.1, Math.min(10, newZoom))); // Limit zoom to 0.1x to 10x
+  }, [zoomLevel]);
+
+  // --- Effect Hooks ---
+
+  // Load dark mode preference from localStorage on mount
+  useEffect(() => {
+    const savedDarkMode = localStorage.getItem('darkMode') === 'true';
+    setDarkMode(savedDarkMode);
+    document.documentElement.classList.toggle('dark', savedDarkMode);
+  }, []);
+
+  // Update imageRef source whenever processedImage changes
+  useEffect(() => {
+    // Only use processedImage for display and operations
+    if (processedImage) {
+      imageRef.current.src = processedImage;
+    } else if (originalImage) {
+      imageRef.current.src = originalImage; // Fallback for initial display or failed removal
+    } else {
+      imageRef.current.src = ''; // Clear image if no image is loaded
+    }
+  }, [processedImage, originalImage]);
+
+
+  // Redraw canvas whenever relevant state changes
+  useEffect(() => {
+    drawCanvas();
+  }, [drawCanvas, processedImage, originalImage, zoomLevel, pan, backgroundType, backgroundColor, customBackgroundDataUrl, cropShape, customCropWidth, customCropHeight]);
+
+  // Attach/detach mouse and wheel event listeners for canvas
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    canvas.addEventListener('mousedown', handleMouseDown);
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseup', handleMouseUp);
+    canvas.addEventListener('mouseleave', handleMouseLeave);
+    canvas.addEventListener('wheel', handleWheel, { passive: false }); // Needs passive: false for preventDefault
+
+    return () => {
+      canvas.removeEventListener('mousedown', handleMouseDown);
+      canvas.removeEventListener('mousemove', handleMouseMove);
+      canvas.removeEventListener('mouseup', handleMouseUp);
+      canvas.removeEventListener('mouseleave', handleMouseLeave);
+      canvas.removeEventListener('wheel', handleWheel);
+    };
+  }, [handleMouseDown, handleMouseMove, handleMouseUp, handleMouseLeave, handleWheel]);
+
+
+  // --- Download Logic ---
+
+  const renderFinalImageToBlob = useCallback(async (format = 'png') => {
+    // Determine which image to use for final rendering: only processed, then original
+    const sourceImage = processedImage || originalImage;
+
+    if (!sourceImage) {
+      showToast('No image loaded to render!', 'error');
+      return null;
+    }
+
+    // Temporarily load the source image into a new Image object to get its natural dimensions
+    const tempImage = new Image();
+    tempImage.src = sourceImage;
+    await new Promise(resolve => tempImage.onload = resolve); // Wait for image to load
+
+    const originalWidth = tempImage.naturalWidth;
+    const originalHeight = tempImage.naturalHeight;
+
+    let targetWidth, targetHeight;
+
+    // Determine target output dimensions based on preset or custom input
+    if (outputPreset !== 'none') {
+      switch (outputPreset) {
+        case '300x400':
+          targetWidth = 300;
+          targetHeight = 400;
+          break;
+        case '600x800':
+          targetWidth = 600;
+          targetHeight = 800;
+          break;
+        case 'passport':
+          targetWidth = 350;
+          targetHeight = 450;
+          break;
+        default:
+          targetWidth = originalWidth;
+          targetHeight = originalHeight;
+      }
+    } else if (customOutputWidth && customOutputHeight) {
+      targetWidth = parseInt(customOutputWidth);
+      targetHeight = parseInt(customOutputHeight);
+    } else {
+      // Default to A4 at specified DPI, maintaining original image's aspect ratio
+      const pixelsPerMM = customDPI / 25.4;
+      let baseTargetWidth = 210 * pixelsPerMM;
+      let baseTargetHeight = 297 * pixelsPerMM;
+
+      const sourceAspectRatio = originalWidth / originalHeight;
+      if (baseTargetWidth / baseTargetHeight > sourceAspectRatio) {
+          baseTargetWidth = baseTargetHeight * sourceAspectRatio;
+      } else {
+          baseTargetHeight = baseTargetWidth / sourceAspectRatio;
+      }
+
+      targetWidth = baseTargetWidth;
+      targetHeight = baseTargetHeight;
+
+      let densityFactor = 1;
+      if (pixelDensity === '2x') densityFactor = 2;
+      if (pixelDensity === '3x') densityFactor = 3;
+      if (pixelDensity === '4k') {
+        const min4kWidth = 3840;
+        const min4kHeight = 2160;
+        if (targetWidth < min4kWidth || targetHeight < min4kHeight) {
+            if (sourceAspectRatio > (min4kWidth / min4kHeight)) {
+                targetWidth = min4kWidth;
+                targetHeight = min4kWidth / sourceAspectRatio;
+            } else {
+                targetHeight = min4kHeight;
+                targetWidth = min4kHeight * sourceAspectRatio;
+            }
+        }
+      }
+      targetWidth *= densityFactor;
+      targetHeight *= densityFactor;
+    }
+
+    const offscreenCanvas = document.createElement('canvas');
+    const offscreenCtx = offscreenCanvas.getContext('2d');
+
+    offscreenCanvas.width = targetWidth;
+    offscreenCanvas.height = targetHeight;
+
+    // Apply background
+    if (backgroundType === 'color') {
+      offscreenCtx.fillStyle = backgroundColor;
+      offscreenCtx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+    } else if (backgroundType === 'image' && customBackgroundDataUrl) {
+      const bgImage = new Image();
+      bgImage.src = customBackgroundDataUrl;
+      await new Promise(resolve => bgImage.onload = resolve);
+      offscreenCtx.drawImage(bgImage, 0, 0, offscreenCanvas.width, offscreenCanvas.height);
+    } else {
+      // Transparent background, no fill needed for PNG
+    }
+
+    const image = tempImage; 
+    const imgW = image.naturalWidth;
+    const imgH = image.naturalHeight;
+
+    // Get preview canvas dimensions - crucial for translating zoom/pan to source image coordinates
+    const previewCanvas = canvasRef.current;
+    const previewCanvasWidth = previewCanvas ? previewCanvas.width : imgW;
+    const previewCanvasHeight = previewCanvas ? previewCanvas.height : imgH;
+
+    // Calculate the dimensions of the image as it's drawn on the *preview* canvas
+    const displayedImageWidthOnPreview = imgW * zoomLevel;
+    const displayedImageHeightOnPreview = imgH * zoomLevel;
+
+    // Calculate the top-left corner of the displayed image on the *preview* canvas, considering centering and pan
+    const displayedImageXOnPreview = (previewCanvasWidth - displayedImageWidthOnPreview) / 2 + pan.x;
+    const displayedImageYOnPreview = (previewCanvasHeight - displayedImageHeightOnPreview) / 2 + pan.y;
+
+    // Calculate the source rectangle (sx, sy, sWidth, sHeight) from the ORIGINAL IMAGE
+    // This represents the portion of the source image visible within the preview canvas's bounds that aligns with the crop ratio.
+    
+    let sx, sy, sWidth, sHeight;
+
+    const cropRatio = parseFloat(customCropWidth) / parseFloat(customCropHeight);
+    
+    // Determine the effective cropping rectangle on the *preview* canvas based on the desired crop ratio
+    let effectivePreviewCropWidth, effectivePreviewCropHeight;
+    const currentPreviewRatio = previewCanvasWidth / previewCanvasHeight;
+
+    if (cropRatio > currentPreviewRatio) { // Desired crop is wider than preview canvas ratio
+      effectivePreviewCropWidth = previewCanvasWidth;
+      effectivePreviewCropHeight = previewCanvasWidth / cropRatio;
+    } else { // Desired crop is taller than preview canvas ratio
+      effectivePreviewCropHeight = previewCanvasHeight;
+      effectivePreviewCropWidth = previewCanvasHeight * cropRatio;
+    }
+
+    // Center the effective cropping rectangle on the preview canvas
+    const effectivePreviewCropX = (previewCanvasWidth - effectivePreviewCropWidth) / 2;
+    const effectivePreviewCropY = (previewCanvasHeight - effectivePreviewCropHeight) / 2;
+
+    // Now, calculate the source region (sx, sy, sWidth, sHeight) from the original image
+    // that corresponds to this effective cropping rectangle on the preview.
+    
+    // Calculate the coordinates of the image relative to the *effective cropping rectangle* on the preview
+    // These are the offsets from the top-left of the effective crop area to the top-left of the *displayed* image
+    const imageOffsetXInCrop = displayedImageXOnPreview - effectivePreviewCropX;
+    const imageOffsetYInCrop = displayedImageYOnPreview - effectivePreviewCropY;
+
+    sx = Math.max(0, -imageOffsetXInCrop / zoomLevel);
+    sy = Math.max(0, -imageOffsetYInCrop / zoomLevel);
+    
+    sWidth = effectivePreviewCropWidth / zoomLevel;
+    sHeight = effectivePreviewCropHeight / zoomLevel;
+
+    // Clamp sWidth, sHeight to not exceed original image dimensions from (sx, sy)
+    sWidth = Math.min(sWidth, imgW - sx);
+    sHeight = Math.min(sHeight, imgH - sy);
+
+    // Ensure positive dimensions
+    sWidth = Math.max(0, sWidth);
+    sHeight = Math.max(0, sHeight);
+
+    // Aspect ratio of the selected source region (after clamping)
+    const sourceRegionAspectRatio = sWidth / sHeight;
+
+    offscreenCtx.save(); // Save context before applying clip path
+
+    let finalDrawX = 0, finalDrawY = 0, finalDrawWidth = offscreenCanvas.width, finalDrawHeight = offscreenCanvas.height;
+
+    // Apply clipping based on crop shape for final render (to the destination on offscreenCanvas)
+    if (cropShape === 'circle') {
+        const radius = Math.min(offscreenCanvas.width, offscreenCanvas.height) / 2;
+        offscreenCtx.beginPath();
+        offscreenCtx.arc(offscreenCanvas.width / 2, offscreenCanvas.height / 2, radius, 0, Math.PI * 2, true);
+        offscreenCtx.closePath();
+        offscreenCtx.clip();
+
+        // When cropping to a circle, the image will be scaled to fit inside the circle.
+        // We'll calculate the drawing dimensions to ensure it fills the circle while maintaining aspect ratio.
+        const circleDiameter = radius * 2;
+        if (sourceRegionAspectRatio > 1) { // Source is wider
+            finalDrawWidth = circleDiameter;
+            finalDrawHeight = circleDiameter / sourceRegionAspectRatio;
+        } else { // Source is taller or square
+            finalDrawHeight = circleDiameter;
+            finalDrawWidth = circleDiameter * sourceRegionAspectRatio;
+        }
+        finalDrawX = (offscreenCanvas.width - finalDrawWidth) / 2;
+        finalDrawY = (offscreenCanvas.height - finalDrawHeight) / 2;
+
+    } else { // 'custom' crop shape (which is now the only rectangular type)
+        const effectiveOutputWidth = parseFloat(customOutputWidth || targetWidth);
+        const effectiveOutputHeight = parseFloat(customOutputHeight || targetHeight);
+        
+        const desiredOutputRatio = effectiveOutputWidth / effectiveOutputHeight;
+        
+        let clipRectWidth, clipRectHeight;
+
+        // Determine clipping rectangle dimensions to fit the desired ratio within the offscreen canvas
+        if (desiredOutputRatio > (offscreenCanvas.width / offscreenCanvas.height)) {
+            clipRectWidth = offscreenCanvas.width;
+            clipRectHeight = offscreenCanvas.width / desiredOutputRatio;
+        } else {
+            clipRectHeight = offscreenCanvas.height;
+            clipRectWidth = offscreenCanvas.height * desiredOutputRatio;
+        }
+
+        const clipRectX = (offscreenCanvas.width - clipRectWidth) / 2;
+        const clipRectY = (offscreenCanvas.height - clipRectHeight) / 2;
+
+        offscreenCtx.beginPath();
+        offscreenCtx.rect(clipRectX, clipRectY, clipRectWidth, clipRectHeight);
+        offscreenCtx.clip();
+
+        // Recalculate finalDraw dimensions to fit within this newly defined clipped area
+        const clippedAreaAspectRatio = clipRectWidth / clipRectHeight;
+        if (sourceRegionAspectRatio > clippedAreaAspectRatio) {
+            finalDrawHeight = clipRectWidth / sourceRegionAspectRatio;
+            finalDrawWidth = clipRectWidth;
+            finalDrawY = clipRectY + (clipRectHeight - finalDrawHeight) / 2;
+            finalDrawX = clipRectX;
+        } else {
+            finalDrawWidth = clipRectHeight * sourceRegionAspectRatio;
+            finalDrawHeight = clipRectHeight;
+            finalDrawX = clipRectX + (clipRectWidth - finalDrawWidth) / 2;
+            finalDrawY = clipRectY;
+        }
+    }
+
+    // Draw the source region onto the calculated destination area within the offscreen canvas
+    offscreenCtx.drawImage(image, sx, sy, sWidth, sHeight, finalDrawX, finalDrawY, finalDrawWidth, finalDrawHeight);
+    offscreenCtx.restore(); // Restore context to remove clipping path
+
+    return new Promise(resolve => {
+      offscreenCanvas.toBlob(resolve, `image/${format}`, 1.0); // Set quality to 1.0 for both PNG and JPEG
+    });
+  }, [processedImage, originalImage, zoomLevel, pan, backgroundType, backgroundColor, customBackgroundDataUrl, cropShape, customCropWidth, customCropHeight, pixelDensity, customDPI, outputPreset, customOutputWidth, customOutputHeight, showToast]);
+
+
+  const downloadImage = useCallback(async (format) => {
+    setIsLoading(true);
+    showToast(`Preparing ${format.toUpperCase()} for download...`, 'info');
+    try {
+      const blob = await renderFinalImageToBlob(format);
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `edited_image.${format}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showToast(`Image downloaded as ${format.toUpperCase()}!`, 'success');
+      }
+    } catch (error) {
+      console.error('Download failed:', error);
+      showToast(`Failed to download image: ${error.message}`, 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [renderFinalImageToBlob, showToast]);
+
+  // --- LLM Functions ---
+
+  const blobToBase64 = (blob) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        // The result is in the format "data:image/png;base64,iVBORw0KGgo..."
+        // We only need the base64 part after the comma.
+        resolve(reader.result.split(',')[1]);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  };
+
+  const handleGenerateDescription = useCallback(async () => {
+    if (!processedImage) { // superResolvedImage removed
+      showToast('Please upload and process an image first!', 'error');
+      return;
+    }
+    if (REMOVEBG_API_KEY === "YOUR_REMOVEBG_API_KEY") {
+      showToast('Please set your remove.bg API key to enable this feature.', 'error');
+      return;
+    }
+
+    setIsGeneratingDescription(true);
+    showToast('Generating description with AI...', 'info');
+    setGeneratedDescription(''); // Clear previous description
+
+    try {
+      const finalImageBlob = await renderFinalImageToBlob('png'); // Get the final rendered image as a blob
+      if (!finalImageBlob) {
+        throw new Error('Failed to render final image for description.');
+      }
+      const base64ImageData = await blobToBase64(finalImageBlob);
+
+      const promptText = "Describe the main subject in this image concisely for an alt text or a short caption. Focus on the main object, its pose/expression, and key characteristics. Do not mention the background as it has been removed or replaced. Keep it under 2 sentences and suitable for visual impairment assistance.";
+
+      let chatHistory = [];
+      chatHistory.push({
+        role: "user",
+        parts: [
+          { text: promptText },
+          { inlineData: { mimeType: "image/png", data: base64ImageData } }
+        ]
+      });
+
+      const payload = { contents: chatHistory };
+      const apiKey = ""; // Canvas will automatically provide the API key at runtime
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(`Gemini API Error: ${response.status} - ${errorData.error?.message || response.statusText}`);
+      }
+
+      const result = await response.json();
+      if (result.candidates && result.candidates.length > 0 &&
+          result.candidates[0].content && result.candidates[0].content.parts &&
+          result.candidates[0].content.parts.length > 0) {
+        setGeneratedDescription(result.candidates[0].content.parts[0].text);
+        setShowDescriptionModal(true); // Open modal to show description
+        showToast('Image description generated!', 'success');
+      } else {
+        throw new Error('No content received from Gemini API.');
+      }
+
+    } catch (error) {
+      console.error("Image description generation failed:", error);
+      setGeneratedDescription(`Error: ${error.message}`);
+      setShowDescriptionModal(true); // Still show modal with error
+      showToast(`Description generation failed: ${error.message}`, 'error');
+    } finally {
+      setIsGeneratingDescription(false);
+    }
+  }, [processedImage, REMOVEBG_API_KEY, renderFinalImageToBlob, showToast]);
+
+  // handleEnhanceImage function removed
+
+  // Handle change for output preset, updating crop shape and dimensions
+  const handleOutputPresetChange = useCallback((event) => {
+    const selectedPreset = event.target.value;
+    setOutputPreset(selectedPreset);
+
+    // Crop shape remains 'custom' or 'circle' based on what user explicitly selected,
+    // but the dimensions for 'custom' are updated.
+    
+    if (selectedPreset === 'none') {
+      setCustomOutputWidth('');
+      setCustomOutputHeight('');
+      // Only reset customCropWidth/Height if cropShape is 'custom', not if it's 'circle'
+      if (cropShape === 'custom') {
+        setCustomCropWidth(800); // Revert to default custom values
+        setCustomCropHeight(600);
+      }
+    } else {
+      setCropShape('custom'); // Ensure it defaults to custom when a preset is selected
+      switch (selectedPreset) {
+        case '300x400':
+          setCustomOutputWidth(300);
+          setCustomOutputHeight(400);
+          setCustomCropWidth(300);
+          setCustomCropHeight(400);
+          break;
+        case '600x800':
+          setCustomOutputWidth(600);
+          setCustomOutputHeight(800);
+          setCustomCropWidth(600);
+          setCustomCropHeight(800);
+          break;
+        case 'passport':
+          setCustomOutputWidth(350);
+          setCustomOutputHeight(450);
+          setCustomCropWidth(350);
+          setCustomCropHeight(450);
+          break;
+        default:
+          setCustomOutputWidth('');
+          setCustomOutputHeight('');
+          if (cropShape === 'custom') {
+            setCustomCropWidth(800);
+            setCustomCropHeight(600);
+          }
+      }
+    }
+  }, [cropShape]);
+
+
+  // --- UI Handlers ---
+
+  const toggleDarkMode = useCallback(() => {
+    setDarkMode(prev => {
+      const newMode = !prev;
+      document.documentElement.classList.toggle('dark', newMode);
+      localStorage.setItem('darkMode', newMode);
+      showToast(newMode ? 'Dark mode enabled!' : 'Light mode enabled!', 'info');
+      return newMode;
+    });
+  }, [showToast]);
+
+  // Lucide React icon for message-square-text
+  const MessageSquareTextIcon = (props) => (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      {...props}
+    >
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+      <path d="M10 8h4"/>
+      <path d="M10 12h4"/>
+    </svg>
+  );
+
+  // Lucide React icon for sun (for dark mode toggle)
+  const SunIcon = (props) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><circle cx="12" cy="12" r="8"/><line x1="12" x2="12" y1="2" y2="6"/><line x1="12" x2="12" y1="18" y2="22"/><line x1="4.22" x2="5.64" y1="4.22" y2="5.64"/><line x1="18.36" x2="19.78" y1="18.36" y2="19.78"/><line x1="2" x2="6" y1="12" y2="12"/><line x1="18" x2="22" y1="12" y2="12"/><line x1="4.22" x2="5.64" y1="19.78" y2="18.36"/><line x1="18.36" x2="19.78" y1="4.22" y2="5.64"/></svg>
+  );
+
+  // Lucide React icon for moon (for dark mode toggle)
+  const MoonIcon = (props) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+  );
+
+  // Lucide React icon for upload
+  const UploadIcon = (props) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+  );
+
+  // Lucide React icon for file-text (PNG download)
+  const FileTextIcon = (props) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+  );
+
+  // Lucide React icon for image (JPEG download)
+  const ImageIcon = (props) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>
+  );
+
+  // Lucide React icon for refresh-ccw (Reset)
+  const RefreshCcwIcon = (props) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.76 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.76-2.74L21 16"/><path d="M21 21v-5h-5"/></svg>
+  );
+
+  // SparklesIcon and its usage removed
+
+  return (
+    <div className={`min-h-screen flex flex-col items-center justify-center p-4 ${darkMode ? 'bg-gray-900 text-gray-100' : 'bg-gray-100 text-gray-900'} font-inter transition-colors duration-300`}>
+      {/* Font Awesome for Instagram icon */}
+      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"></link>
+
+      {/* Header Credit Bar */}
+      <header className="fixed top-0 left-0 right-0 bg-gradient-to-r from-blue-600 to-purple-600 text-white p-3 flex items-center justify-between shadow-lg z-50">
+        <div className="flex items-center space-x-2">
+          <span className="font-semibold text-lg">Made by Nishikant Xalxo</span>
+          <a href="https://www.instagram.com/nishi_vamp" target="_blank" rel="noopener noreferrer" className="text-white hover:text-pink-300 transition-colors duration-200">
+            {/* Instagram icon */}
+            <i className="fab fa-instagram text-xl"></i>
+          </a>
+        </div>
+        <button
+          onClick={toggleDarkMode}
+          className="p-2 rounded-full hover:bg-white hover:bg-opacity-20 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-white"
+          aria-label="Toggle dark mode"
+        >
+          {darkMode ? (
+            <SunIcon />
+          ) : (
+            <MoonIcon />
+          )}
+        </button>
+      </header>
+
+      {/* Main Content Area */}
+      <div className={`w-full max-w-7xl flex flex-col lg:flex-row gap-6 p-6 rounded-xl shadow-2xl mt-20 ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
+
+        {/* Left Panel: Upload and Controls */}
+        <div className="flex-1 lg:w-1/3 flex flex-col gap-6">
+          {/* Upload Section */}
+          <div
+            className={`border-2 border-dashed ${darkMode ? 'border-gray-600 hover:border-blue-500' : 'border-gray-300 hover:border-blue-400'} rounded-xl p-6 text-center transition-colors duration-200 cursor-pointer`}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleDrop}
+            onClick={() => document.getElementById('imageUpload').click()}
+          >
+            <input
+              type="file"
+              id="imageUpload"
+              accept="image/jpeg, image/png, image/webp"
+              className="hidden"
+              onChange={handleImageUpload}
+            />
+            <UploadIcon className={`mx-auto mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} />
+            <p className="font-semibold text-lg mb-2">Drag & Drop or Click to Upload</p>
+            <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>JPG, PNG, WEBP up to 50MB</p> {/* Updated text */}
+          </div>
+
+          {/* Controls Section */}
+          <div className={`p-6 rounded-xl shadow-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+            <h2 className="text-xl font-semibold mb-4">Image Controls</h2>
+
+            {/* API Key Warning for remove.bg */}
+            {REMOVEBG_API_KEY === "YOUR_REMOVEBG_API_KEY" && (
+              <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">
+                <strong className="font-bold">remove.bg API Key Missing!</strong>
+                <span className="block sm:inline"> Please replace `YOUR_REMOVEBG_API_KEY` in the code with your actual key from remove.bg to enable background removal.</span>
+              </div>
+            )}
+             {/* Super Resolution API key warning removed */}
+
+            {/* Background Options */}
+            <div className="mb-6">
+              <label className="block text-sm font-medium mb-2">Background Type</label>
+              <div className="flex space-x-4 mb-3">
+                <label className="inline-flex items-center">
+                  <input
+                    type="radio"
+                    name="background"
+                    value="transparent"
+                    checked={backgroundType === 'transparent'}
+                    onChange={() => setBackgroundType('transparent')}
+                    className="form-radio text-blue-600"
+                  />
+                  <span className="ml-2">Transparent</span>
+                </label>
+                <label className="inline-flex items-center">
+                  <input
+                    type="radio"
+                    name="background"
+                    value="color"
+                    checked={backgroundType === 'color'}
+                    onChange={() => setBackgroundType('color')} // Only set type here
+                    className="form-radio text-blue-600"
+                  />
+                  <span className="ml-2">Solid Color</span>
+                </label>
+                <label className="inline-flex items-center">
+                  <input
+                    type="radio"
+                    name="background"
+                    value="image"
+                    checked={backgroundType === 'image'}
+                    onChange={() => setBackgroundType('image')}
+                    className="form-radio text-blue-600"
+                  />
+                  <span className="ml-2">Custom Image</span>
+                </label>
+              </div>
+              {backgroundType === 'color' && (
+                <input
+                  type="color"
+                  value={backgroundColor}
+                  onChange={(e) => setBackgroundColor(e.target.value)} // Value update
+                  className="w-full h-10 rounded-lg border-2 border-gray-300 cursor-pointer"
+                />
+              )}
+              {backgroundType === 'image' && (
+                <div className="mt-2">
+                  <input
+                    type="file"
+                    accept="image/jpeg, image/png, image/webp"
+                    className="hidden"
+                    id="customBgUpload"
+                    onChange={handleCustomBackgroundUpload}
+                  />
+                  <label htmlFor="customBgUpload" className={`w-full inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm ${darkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'} text-white cursor-pointer`}>
+                    Upload Custom Background
+                  </label>
+                  {customBackgroundDataUrl && <p className="text-xs text-gray-500 mt-2">Background image selected.</p>}
+                </div>
+              )}
+            </div>
+
+            {/* Cropping Options */}
+            <div className="mb-6">
+              <label className="block text-sm font-medium mb-2">Crop Shape</label>
+              <div className="flex space-x-4 mb-3">
+                {/* Removed Rectangle Option */}
+                <label className="inline-flex items-center">
+                  <input
+                    type="radio"
+                    name="cropShape"
+                    value="circle"
+                    checked={cropShape === 'circle'}
+                    onChange={() => setCropShape('circle')}
+                    className="form-radio text-blue-600"
+                  />
+                  <span className="ml-2">Circle</span>
+                </label>
+                <label className="inline-flex items-center">
+                  <input
+                    type="radio"
+                    name="cropShape"
+                    value="custom"
+                    checked={cropShape === 'custom'}
+                    onChange={() => setCropShape('custom')}
+                    className="form-radio text-blue-600"
+                  />
+                  <span className="ml-2">Custom Ratio</span>
+                </label>
+              </div>
+              {/* Custom Ratio inputs are always relevant now */}
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  placeholder="Width"
+                  value={customCropWidth}
+                  onChange={(e) => setCustomCropWidth(e.target.value)}
+                  className={`flex-1 p-2 rounded-lg ${darkMode ? 'bg-gray-800 border-gray-600' : 'border-gray-300'} focus:ring-blue-500 focus:border-blue-500`}
+                />
+                <span className="self-center">x</span>
+                <input
+                  type="number"
+                  placeholder="Height"
+                  value={customCropHeight}
+                  onChange={(e) => setCustomCropHeight(e.target.value)}
+                  className={`flex-1 p-2 rounded-lg ${darkMode ? 'bg-gray-800 border-gray-600' : 'border-gray-300'} focus:ring-blue-500 focus:border-blue-500`}
+                />
+              </div>
+            </div>
+
+            {/* Zoom Slider */}
+            <div className="mb-6">
+              <label className="block text-sm font-medium mb-2">Zoom: {zoomLevel.toFixed(2)}x</label>
+              <input
+                type="range"
+                min="0.1"
+                max="10"
+                step="0.01"
+                value={zoomLevel}
+                onChange={(e) => setZoomLevel(parseFloat(e.target.value))}
+                className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg dark:bg-gray-700"
+              />
+            </div>
+
+            {/* Output Resolution Controls */}
+            <div className="mb-6">
+              <h3 className="text-md font-semibold mb-2">Output Resolution</h3>
+              <label className="block text-sm font-medium mb-2">Pixel Density</label>
+              <select
+                value={pixelDensity}
+                onChange={(e) => setPixelDensity(e.target.value)}
+                className={`w-full p-2 rounded-lg ${darkMode ? 'bg-gray-800 border-gray-600' : 'border-gray-300'} focus:ring-blue-500 focus:border-blue-500`}
+              >
+                <option value="1x">1x (Standard)</option>
+                <option value="2x">2x (Retina)</option>
+                <option value="3x">3x</option>
+                <option value="4k">4K Output</option>
+              </select>
+
+              <label className="block text-sm font-medium mt-4 mb-2">Custom DPI for Print</label>
+              <input
+                type="number"
+                min="72"
+                max="1200"
+                step="1"
+                value={customDPI}
+                onChange={(e) => setCustomDPI(parseInt(e.target.value))}
+                className={`w-full p-2 rounded-lg ${darkMode ? 'bg-gray-800 border-gray-600' : 'border-gray-300'} focus:ring-blue-500 focus:border-blue-500`}
+              />
+
+              <label className="block text-sm font-medium mt-4 mb-2">Resize Presets</label>
+              <select
+                value={outputPreset}
+                onChange={handleOutputPresetChange} // Using the new handler
+                className={`w-full p-2 rounded-lg ${darkMode ? 'bg-gray-800 border-gray-600' : 'border-gray-300'} focus:ring-blue-500 focus:border-blue-500`}
+              >
+                <option value="none">Original Size / A4 Guide</option>
+                <option value="300x400">300x400px</option>
+                <option value="600x800">600x800px</option>
+                <option value="passport">Passport (350x450px)</option>
+              </select>
+
+              {outputPreset === 'none' && (
+                <div className="mt-4">
+                  <label className="block text-sm font-medium mb-2">Custom Output Dimensions (px)</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="number"
+                      placeholder="Width"
+                      value={customOutputWidth}
+                      onChange={(e) => setCustomOutputWidth(e.target.value)}
+                      className={`flex-1 p-2 rounded-lg ${darkMode ? 'bg-gray-800 border-gray-600' : 'border-gray-300'} focus:ring-blue-500 focus:border-blue-500`}
+                    />
+                    <span className="self-center">x</span>
+                    <input
+                      type="number"
+                      placeholder="Height"
+                      value={customOutputHeight}
+                      onChange={(e) => setCustomOutputHeight(e.target.value)}
+                      className={`flex-1 p-2 rounded-lg ${darkMode ? 'bg-gray-800 border-gray-600' : 'border-gray-300'} focus:ring-blue-500 focus:border-blue-500`}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex flex-col gap-3 mt-6">
+              <button
+                onClick={() => downloadImage('png')}
+                disabled={isLoading || !imageRef.current.src}
+                className={`w-full flex items-center justify-center px-6 py-3 rounded-md shadow-lg font-semibold transition-all duration-200 ${isLoading || !imageRef.current.src ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
+              >
+                {isLoading ? (
+                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                ) : (
+                  <FileTextIcon className="mr-2" />
+                )}
+                Download PNG
+              </button>
+              <button
+                onClick={() => downloadImage('jpeg')}
+                disabled={isLoading || !imageRef.current.src}
+                className={`w-full flex items-center justify-center px-6 py-3 rounded-md shadow-lg font-semibold transition-all duration-200 ${isLoading || !imageRef.current.src ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700 text-white'}`}
+              >
+                {isLoading ? (
+                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                ) : (
+                  <ImageIcon className="mr-2" />
+                )}
+                Download JPEG
+              </button>
+              <button
+                onClick={handleGenerateDescription}
+                disabled={isGeneratingDescription || (!processedImage) || REMOVEBG_API_KEY === "YOUR_REMOVEBG_API_KEY"}
+                className={`w-full flex items-center justify-center px-6 py-3 rounded-md shadow-lg font-semibold transition-all duration-200 ${isGeneratingDescription || (!processedImage) || REMOVEBG_API_KEY === "YOUR_REMOVEBG_API_KEY" ? 'bg-gray-400 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-700 text-white'}`}
+              >
+                {isGeneratingDescription ? (
+                  <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                ) : (
+                  <MessageSquareTextIcon className="mr-2" />
+                )}
+                Describe Image ✨
+              </button>
+              {/* Enhance Image button removed */}
+              <button
+                onClick={clearApp}
+                className={`w-full flex items-center justify-center px-6 py-3 rounded-md shadow-lg font-semibold transition-all duration-200 ${darkMode ? 'bg-red-700 hover:bg-red-800' : 'bg-red-500 hover:bg-red-600'} text-white`}
+              >
+                <RefreshCcwIcon className="mr-2" />
+                Reset All
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Panel: Preview */}
+        <div className="flex-1 lg:w-2/3 flex flex-col gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Before Preview */}
+            <div className={`p-4 rounded-xl shadow-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+              <h3 className="text-lg font-semibold mb-3">Original Image</h3>
+              <div className="w-full h-64 md:h-80 flex items-center justify-center overflow-hidden rounded-lg bg-gray-200 dark:bg-gray-600">
+                {originalImage ? (
+                  <img src={originalImage} alt="Original" className="max-w-full max-h-full object-contain" />
+                ) : (
+                  <span className={`${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Upload an image</span>
+                )}
+              </div>
+            </div>
+
+            {/* After Preview (Canvas) */}
+            <div className={`p-4 rounded-xl shadow-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+              <h3 className="text-lg font-semibold mb-3">Processed Preview</h3>
+              <div className="w-full h-64 md:h-80 flex items-center justify-center overflow-hidden rounded-lg relative bg-white dark:bg-gray-800">
+                {originalImage ? (
+                  <canvas
+                    ref={canvasRef}
+                    className="w-full h-full object-contain cursor-grab"
+                    style={{ aspectRatio: '210 / 297', touchAction: 'none' }} // A4 aspect ratio, disable default touch actions
+                  ></canvas>
+                ) : (
+                  <span className={`${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Processed image will appear here</span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Toast Notification Container */}
+      {toast && (
+        <div className={`fixed bottom-4 right-4 p-4 rounded-lg shadow-xl text-white z-[1000] ${toast.type === 'success' ? 'bg-green-500' : toast.type === 'error' ? 'bg-red-500' : 'bg-gray-800'}`}>
+          {toast.message}
+        </div>
+      )}
+
+      {/* Image Description Modal */}
+      {showDescriptionModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[1100]" onClick={() => setShowDescriptionModal(false)}>
+          <div className={`p-6 rounded-lg shadow-xl ${darkMode ? 'bg-gray-700 text-gray-100' : 'bg-white text-gray-900'} w-11/12 md:w-1/2 max-w-lg`} onClick={(e) => e.stopPropagation()}>
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-semibold">Image Description</h3>
+              <button onClick={() => setShowDescriptionModal(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-x"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+              </button>
+            </div>
+            <p className="text-lg mb-4">{generatedDescription}</p>
+            <button onClick={() => setShowDescriptionModal(false)} className={`px-4 py-2 rounded-md font-semibold ${darkMode ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-500 hover:bg-blue-600'} text-white`}>
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default App;
